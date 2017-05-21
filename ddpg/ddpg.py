@@ -28,17 +28,17 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "1"  # use correct GPU
 #   Training Parameters
 # ==========================
 # Max training steps
-MAX_EPISODES = 50000
+MAX_EPISODES = 1000
 # Max episode length
-MAX_EP_STEPS = 1000
+MAX_EP_STEPS = 200
 # Base learning rate for the Actor network
-ACTOR_LEARNING_RATE = 0.001
+ACTOR_LEARNING_RATE = 0.01
 # Base learning rate for the Critic Network
-CRITIC_LEARNING_RATE = 0.0001
+CRITIC_LEARNING_RATE = 0.001
 # Discount factor
 GAMMA = 0.99
 # Soft target update param
-TAU = 0.001
+TAU = 0.05
 STATE_DIM = 4
 ACTION_DIM = 1
 ACTION_PROB_DIMS = 2
@@ -344,8 +344,8 @@ def train(sess, env, actor, critic):
 
                 writer.add_summary(summary_str, i)
                 writer.flush()
-
-                print(
+                # TODO checkwhich ep reward is being printed
+                print(  # TODO replace maxq with something more interesting
                 '| Reward: %.2i' % int(ep_reward), " | Episode", i, \
                 '| Qmax: %.4f' % (ep_ave_max_q / float(j)))
 
@@ -357,7 +357,7 @@ def choose_action(probabilities):
 
 def main(_):
     with tf.Session() as sess:
-
+        # TODO: reduce network sizes. keep all states stop editing this ver, add dropout in successor
         env = gym.make(ENV_NAME)
         np.random.seed(RANDOM_SEED)
         tf.set_random_seed(RANDOM_SEED)
