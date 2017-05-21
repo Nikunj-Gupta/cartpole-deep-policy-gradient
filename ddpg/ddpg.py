@@ -40,7 +40,8 @@ GAMMA = 0.99
 # Soft target update param
 TAU = 0.001
 STATE_DIM = 4
-ACTION_DIM = 2
+ACTION_DIM = 1
+ACTION_PROB_DIMS = 2
 ACTION_BOUND = 1
 ACTION_SPACE = [0, 1]
 
@@ -79,6 +80,7 @@ class ActorNetwork(object):
         self.sess = sess
         self.s_dim = STATE_DIM
         self.a_dim = ACTION_DIM
+        self.a_prob_dim = ACTION_PROB_DIMS
         self.action_bound = ACTION_BOUND
         self.learning_rate = ACTOR_LEARNING_RATE
         self.tau = TAU
@@ -117,7 +119,7 @@ class ActorNetwork(object):
         net = tflearn.fully_connected(net, 300, activation='relu')
         # Final layer weights are init to Uniform[-3e-3, 3e-3]
         w_init = tflearn.initializations.uniform(minval=-0.003, maxval=0.003)
-        out_actions = tflearn.fully_connected(net, self.a_dim, activation='softmax', weights_init=w_init)
+        out_actions = tflearn.fully_connected(net, ACTION_PROB_DIMS, activation='softmax', weights_init=w_init)
         return in_states, out_actions
 
     def train(self, inputs, a_gradient):
@@ -161,7 +163,7 @@ class CriticNetwork(object):
         self.tau = TAU
 
         # Create the critic network
-        self.inputs, self.action, self.onnet_out_reward = self.create_critic_network()
+        self.in_states, self.in_actions, self.onnet_out_reward = self.create_critic_network()
 
         self.network_params = tf.trainable_variables()[num_actor_vars:]
 
@@ -177,14 +179,14 @@ class CriticNetwork(object):
              for i in range(len(self.target_network_params))]
 
         # Network target (y_i)
-        self.predicted_q_value_sum = tf.placeholder(tf.float32, [None, 1])
+        self.predicted_q_values = tf.placeholder(tf.float32, [None, 1])
 
         # Define loss and optimization Op
-        self.loss = tflearn.mean_square(self.predicted_q_value_sum, self.onnet_out_reward)
+        self.loss = tflearn.mean_square(self.predicted_q_values, self.onnet_out_reward)
         self.optimize = tf.train.AdamOptimizer(self.learning_rate).minimize(self.loss)
 
         # Get the gradient of the net w.r.t. the action
-        self.action_grads = tf.gradients(self.onnet_out_reward, self.action)
+        self.action_grads = tf.gradients(self.onnet_out_reward, self.in_actions)
 
     def create_critic_network(self):
         inp_state = tflearn.input_data(shape=[None, self.s_dim])
@@ -202,21 +204,21 @@ class CriticNetwork(object):
         # Weights are init to Uniform[-3e-3, 3e-3]
         w_init = tflearn.initializations.uniform(minval=-0.003, maxval=0.003)
         #out_rewards = tflearn.layers.core.single_unit(net, activation='linear', name='output_rewards')
-        out_reward = tflearn.fully_connected(net, 1, weights_init=w_init)  # FIXME predicts instant reward. need string of rewards
+        out_reward = tflearn.fully_connected(net, 1, weights_init=w_init)  # FIXME predicts single reward, need string of rewards
 
         return inp_state, inp_action, out_reward
 
-    def train(self, inputs, action, sum_mixed_rewards):  # note: replaced predicted_q_value with sum of mixed rewards
+    def train(self, observed_states, observed_action, mixed_rewards):  # note: replaced predicted_q_value with sum of mixed rewards
         return self.sess.run([self.onnet_out_reward, self.optimize], feed_dict={
-            self.inputs: inputs,
-            self.action: action,
-            self.predicted_q_value_sum: sum_mixed_rewards
+            self.in_states: observed_states,
+            self.in_actions: observed_action,
+            self.predicted_q_values: mixed_rewards
         })
 
     def predict(self, inputs, action):
         return self.sess.run(self.onnet_out_reward, feed_dict={
-            self.inputs: inputs,
-            self.action: action
+            self.in_states: inputs,
+            self.in_actions: action
         })
 
     def predict_target(self, inputs, action):
@@ -227,8 +229,8 @@ class CriticNetwork(object):
 
     def action_gradients(self, inputs, actions):
         return self.sess.run(self.action_grads, feed_dict={
-            self.inputs: inputs,
-            self.action: actions
+            self.in_states: inputs,
+            self.in_actions: actions
         })
 
     def update_target_network(self):
@@ -280,6 +282,7 @@ def train(sess, env, actor, critic):
                 env.render()
 
             action_probabilities = actor.predict(np.reshape(s, (1, STATE_DIM)))
+            #print("action probs", action_probabilities)
             action = choose_action(action_probabilities)
             #print("action", action)
             s2, r, done, info = env.step(action)
@@ -293,28 +296,37 @@ def train(sess, env, actor, critic):
                 s_batch, a_batch, r_batch, done_batch, s2_batch = \
                     replay_buffer.sample_batch(MINIBATCH_SIZE)
 
+                # action probs to actions  # TODO how to deal with non-determinate policies
+                # convert actor.predict_target(s2_batch) to actions
+                # the problem is that critic expects actions to always be determinate, when in fact they are probab
                 # Calculate targets
-                targnet_predicted_rewards = critic.predict_target(s2_batch, actor.predict_target(s2_batch))
+                # todo can we just feed real a and s batch here, no s2?
+                # fixme critic predict expects 1D actions not 2D probabilities
+                a_batch = np.reshape(a_batch, (len(a_batch), 1))
+                #print("sbshape", np.shape(s_batch), "\n a shape", np.shape(a_batch))
+                targnet_predicted_reward = critic.predict_target(s_batch, a_batch)
+                #targnet_predicted_reward = critic.predict_target(s2_batch, actor.predict_target(s2_batch))
+                # print("targnet prediction", targnet_predicted_reward)  # this is a whole reward tensor!!
 
                 # actually, we mix observations with predictions by factor gamma
+                # fixme I think we need to get rid of this block. targ reward is single value?
                 obs_plus_predicted_rewards = []
                 for k in range(MINIBATCH_SIZE):
                     if done_batch[k]:
                         obs_plus_predicted_rewards.append(r_batch[k])  # final timestep is just the reward
                     else:
-                        obs_plus_predicted_rewards.append(r_batch[k] + GAMMA * targnet_predicted_rewards[k])
-
+                        obs_plus_predicted_rewards.append(r_batch[k] + GAMMA * targnet_predicted_reward[k])
+                obs_plus_predicted_rewards = np.reshape(obs_plus_predicted_rewards, (len(obs_plus_predicted_rewards), 1))
                 # Update the critic given the targets
-                #### EDIT: EXPERIMENT: trying to sum up rewards to see if this will work
-                total_reward = np.sum(obs_plus_predicted_rewards)
-                predicted_q_value, _ = critic.train(s_batch, a_batch, total_reward)
+                predicted_q_value, _ = critic.train(s_batch, a_batch, obs_plus_predicted_rewards)
                 #predicted_q_value, _ = critic.train(s_batch, a_batch, np.reshape(observed_rewards, (MINIBATCH_SIZE, 1)))
 
                 ep_ave_max_q += np.amax(predicted_q_value)
 
                 # Update the actor policy using the sampled gradient
-                a_outs = actor.predict(s_batch)
-                grads = critic.action_gradients(s_batch, a_outs)
+                #a_outs = actor.predict(s_batch)
+                grads = critic.action_gradients(s_batch, a_batch)
+                #grads = critic.action_gradients(s_batch, a_outs)  # we aren't deterministic
                 actor.train(s_batch, grads[0])
 
                 # Update target networks
@@ -333,9 +345,9 @@ def train(sess, env, actor, critic):
                 writer.add_summary(summary_str, i)
                 writer.flush()
 
-                print
+                print(
                 '| Reward: %.2i' % int(ep_reward), " | Episode", i, \
-                '| Qmax: %.4f' % (ep_ave_max_q / float(j))
+                '| Qmax: %.4f' % (ep_ave_max_q / float(j)))
 
                 break
 
